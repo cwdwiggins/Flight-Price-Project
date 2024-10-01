@@ -1,0 +1,531 @@
+---
+title: "index"
+author: "Cole Dwiggins"
+date: "2024-09-30"
+output: html_document
+---
+
+# Flight Price Prediction Project
+
+## Introduction
+
+In this project, we attempt to predict the prices of airfares in India based off four features: the airline, the route the flight is taking, the total number of stops the flight makes during its route, and the time of the year. This dataset was obtained from Kaggle (link to the dataset: <https://www.kaggle.com/datasets/viveksharmar/flight-price-data>), and these features were determined after examining their effects on the flight fares through exploratory data analysis. After determining the features to use in modeling, three regression models were compared. The comparison included linear regression, random forest regression, and decision tree regression, and each model's performance was evaluated their respective prediction residuals and calculating the model's R-squared value. The best model was then selected and its diagnostic plots were built. Conclusion and next steps are discussed at the end of the analysis.
+
+## Project code
+
+### Import required libraries and data
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(car)
+library(stringr)
+library(tidymodels)
+library(ranger)
+library(rpart)
+library(rpart.plot)
+library(ggfortify)
+
+flights <- read_csv("flight_dataset.csv")
+```
+
+### Data Inspection and cleaning
+
+Summary of the data
+
+```{r}
+str(flights)
+```
+
+Evaluate for missing data
+
+```{r}
+colSums(is.na(flights))
+```
+
+Check for uniqueness in categorical columns
+
+```{r}
+unique(flights$Airline)
+unique(flights$Source)
+unique(flights$Destination)
+```
+
+Convert the date columns and the number of stops column to factors for plotting purposes
+
+```{r}
+flights <- flights %>%
+  mutate(Date = as.factor(Date),
+         Month = as.factor(Month),
+         Year = as.factor(Year),
+         Total_Stops = as.factor(Total_Stops)
+         )
+```
+
+### Exploratory Data Analysis
+
+The purpose of this section is to identify candidate features for the regression model. To do this, each of the variables will be examined to identify which has a substantial impact on price. Occasionally, statistical analysis is used to confirm assumptions or further investigate the impact a particular variable has on the flight fare.
+
+Determine how the month affects price
+
+```{r}
+prices_by_month <- flights %>% 
+  group_by(Month) %>% 
+  summarize(mean_price = mean(Price), std_price = sd(Price))
+prices_by_month
+```
+
+Plot the differences by month
+
+```{r}
+ggplot(flights, aes(x = Month, y = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight fares by month")
+```
+
+Plot the mean and standard deviation by month to get a slightly different view
+
+```{r}
+ggplot(prices_by_month, aes(x = Month, y = mean_price)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_price - std_price, ymax = mean_price + std_price),
+                width = 0.5) +
+  ggtitle("Mean flight fares by month")
+```
+
+To best understand the impact that the month has on the price overall, the outliers should be removed, since since some outliers are more than quadruple the amount of the median.
+
+```{r}
+IQR_Months <- flights %>% 
+  group_by(Month) %>% 
+  summarize(Q1 = quantile(Price, probs = 0.25),
+            Q3 = quantile(Price, probs = 0.75),
+            IQR = IQR(Price)) %>%
+  mutate(min = Q1 - 1.5*IQR,
+         max = Q3 + 1.5*IQR)
+max_month3 <- as.numeric(IQR_Months[1, 6])
+max_month4 <- as.numeric(IQR_Months[2, 6])
+max_month5 <- as.numeric(IQR_Months[3, 6])
+max_month6 <- as.numeric(IQR_Months[4, 6])
+
+flightsByMonth_filtered <- flights %>%
+  filter(!(Month == 3 & (Price > max_month3))) %>%
+  filter(!(Month == 4 & (Price > max_month4))) %>%
+  filter(!(Month == 5 & (Price > max_month5))) %>%
+  filter(!(Month == 6 & (Price > max_month6)))
+```
+
+Re-calculate and re-plot
+
+```{r}
+pricesByMonth_wo_outliers <- flightsByMonth_filtered %>% 
+  group_by(Month) %>% 
+  summarize(mean_price = mean(Price), std_price = sd(Price))
+pricesByMonth_wo_outliers
+
+ggplot(flightsByMonth_filtered, aes(x = Month, y = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight fares by month with original outliers removed")
+
+ggplot(pricesByMonth_wo_outliers, aes(x = Month, y = mean_price)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_price - std_price, ymax = mean_price + std_price),
+                width = 0.5) +
+  ggtitle("Mean flight fares by month with original outliers removed")
+```
+
+Perform an ANOVA analysis to see if there is a significant difference.
+
+This test assumes that the sample data is a random subset of a larger population, that each observation is independent, and that the samples follow a normal distribution. The count of each sample will be measured to determine if each sample size is large enough for ANOVA.
+
+To test the assumptions:
+
+```{r}
+ggplot(flightsByMonth_filtered, aes(x = Price, fill = Month)) +
+  geom_histogram(binwidth = 2000, alpha = 0.5)
+
+flightsByMonth_filtered %>%
+  count(Month)
+```
+
+Since each category appears normally distributed and the sample size of each category is above 30, the assumptions for ANOVA hold.
+
+ANOVA Test
+
+```{r}
+mdl_price_by_month <- lm(Price ~ Month, data = flightsByMonth_filtered)
+anova(mdl_price_by_month)
+```
+
+Post-hoc testing
+
+```{r}
+pairwise.t.test(
+  flightsByMonth_filtered$Price,
+  flightsByMonth_filtered$Month,
+  p.adjust.method = 'bonferroni'
+)
+```
+
+**Because the ANOVA returned a p-value less than 0.05, and the post-hoc testing returned statistical significance for several group pairs, this shows the month of the year has an impact on fares**
+
+Does the time of the month matter?
+
+```{r}
+priceByTimeOfMonth <- flights %>%
+  group_by(Month, Date) %>%
+  summarize(mean_price = mean(Price),
+            std_price = sd(Price))
+
+ggplot(flights, aes(x = Date, y = Price)) +
+  stat_summary(fun.y = mean,
+               geom = "line",
+               size = 0.8,
+               aes(group = 1, color = Month)) +
+  stat_summary(fun.y = mean,
+               geom = "point") +
+  stat_summary(fun.data = mean_sdl,
+               geom = "errorbar",
+               width = 0.2,
+               fun.args = list(mult = 1)) +
+  facet_grid(Month ~ .) +
+  theme(legend.position = "none") +
+  ggtitle("Price points over the Dates of each Month")
+```
+
+This shows a consistent trend line that corroborates with the month statistics. No cyclical nature seen. As such, the time of the month probably does not matter.
+
+Check the prices by the airlines
+
+```{r}
+ggplot(flights, aes(y = Airline, x = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight fares by airline")
+```
+
+This shows a clear difference in price depending on the flight airline. How many are in each category?
+
+```{r}
+flights %>% count(Airline)
+```
+
+**The outliers of this dataset lie within Jet Airways Business. Similarly, other airlines have fares clustered around certain values. Thus, the airline feature must be included in the model.**
+
+Check the prices of the source
+
+```{r}
+ggplot(flights, aes(y = Source, x = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight prices by source")
+```
+
+Check the price of the destination
+
+```{r}
+ggplot(flights, aes(y = Destination, x = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight prices by destination")
+```
+
+It seems like there is an interaction with source and destination. To get a better picture, it would be better if the entire route was analyzed instead.
+
+```{r}
+flightsWithRoutes <- flights %>%
+  mutate(Route = str_c(Source, "to", Destination, sep = " "))
+
+ggplot(flightsWithRoutes, aes(y = Route, x = Price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of flight route and respective prices")
+```
+
+Examine how this plays out with the different airlines
+
+```{r}
+ggplot(flightsWithRoutes, aes(y = Route, x = Price)) +
+  geom_boxplot() +
+  geom_point(aes(color = Airline),
+             position = position_dodge(width = 0.3),
+             alpha = 0.5) +
+  ggtitle("Boxplot of flight route and their respective prices with airlines")
+```
+
+It seems like there is separation between the route and the price, but we know that those most expensive flights are with the most expensive airline.
+
+Does the total number of stops play a role?
+
+```{r}
+ggplot(flights, aes(x = Price, fill = Total_Stops)) +
+  geom_density(alpha = 0.5) +
+  ggtitle("Density plot of price distribution by the total stops")
+```
+
+From the density plots alone, they seem to play a role. To determine if there is statistical evidence that they play a role, ANOVA will be carried out.
+
+The assumptions will first be checked again.
+
+```{r}
+flights %>% count(Total_Stops)
+```
+
+Since group 4 only has one observation, drop it
+
+```{r}
+flights_totalStops_filtered <- flights %>%
+  filter(Total_Stops != 4)
+```
+
+Statistical testing
+
+```{r}
+# ANOVA
+mdl_price_by_total_stops <- lm(Price ~ Total_Stops, data = flights_totalStops_filtered)
+anova(mdl_price_by_total_stops)
+
+# Post-hoc testing
+pairwise.t.test(
+  flights_totalStops_filtered$Price,
+  flights_totalStops_filtered$Total_Stops,
+  p.adjust.method = 'bonferroni'
+)
+```
+
+This shows that price will increase in some way with the number of stops, so it should be included in the model.
+
+**The final two features that will be considered in the model will be engineered/derived to look at**
+
+```{r}
+flights_extended_features <- flightsWithRoutes %>%
+  mutate(Total_Duration_min = Duration_hours*60 + Duration_min,
+         Time_of_Day = cut(Dep_hours,
+                           breaks = c(0, 6, 12, 18, 24),
+                           labels = c("dawn", "morning", "afternoon", "night")))
+```
+
+Flight duration
+
+```{r}
+ggplot(flights_extended_features, aes(x = Total_Duration_min, y = Price)) +
+  geom_point()
+```
+
+There doesn't seem to be much of a correlation at all
+
+Time of day for departure and arrival
+
+```{r}
+ggplot(flights_extended_features, aes(x = Time_of_Day, y = Price)) +
+  geom_boxplot()
+```
+
+There doesn't appear to be much separation at all here.
+
+**Results from the exploratory data analysis:** Since there was clear separation and/or statistical significance displayed among the effect of the Airline, Route, Total Stops, and Month on the fare of a flight, and the absence of apparent separation between the flight fare and other features, the Airline, Route, Total_Stops and Month on the flight fare will be used in the regression modeling.
+
+**Thus, the proposed features will thus be: Airline, Route, Total_Stops, and Month**
+
+### Regression Modeling
+
+Using the features proposed from the exploratory data analysis, three regression models will be compared for the best performance. The three models that will be used are linear regression, random forest regression, and decision tree regression. There will also be a brief analysis comparing the performance of the linear regression model with interaction terms present. The goal of adding interaction terms is to increase the accuracy of the model by accounting for potential changes in explanatory variable impact on the flight fare due to the value of other explanatory variables. The results will be summarized in a dataframe and diagnostic plots of the final model will be drawn.
+
+```{r}
+# Proposed features: Airline, Route, Total_Stops, and Month
+
+model_dataset <- flights_extended_features %>%
+  select(Price, Airline, Route, Total_Stops, Month)
+
+# Train test split
+set.seed(123)
+train_test_split <- initial_split(model_dataset, prop = 0.8)
+train_data <- training(train_test_split)
+test_data <- testing(train_test_split)
+```
+
+Fit a linear regression model
+
+```{r}
+fmla <- Price ~ Airline + Route + Total_Stops + Month + 0
+linear_mdl_price <- lm(fmla, data = train_data)
+linear_mdl_price
+```
+
+The above output represents the linear model generated and the coefficients for each of the explanatory variable values in determining the estimated fare of the flight.
+
+Evaluate the model on the training data
+
+```{r}
+linear_mdl_price %>%
+  glance()
+```
+
+Make predictions on the test data and evaluate the accuracy of the predictions
+
+```{r}
+# Make predictions on the test data
+explanatory_data_lr <- test_data %>%
+  select(-Price)
+
+explanatory_data_lr <- explanatory_data_lr %>%
+  mutate(Price_pred = predict(linear_mdl_price, explanatory_data_lr))
+
+explanatory_data_lr$Price <- test_data$Price
+
+# Evaluate the model on the testing data
+explanatory_data_lr <- explanatory_data_lr %>%
+  mutate(res_price = Price_pred - Price,
+         res_mean = Price - mean(Price),
+         res_price_sq = res_price^2,
+         res_mean_sq = res_mean^2)
+
+total_SS <- sum(explanatory_data_lr$res_mean_sq)
+res_SS <- sum(explanatory_data_lr$res_price_sq)
+r_squared_lr <- 1 - (res_SS/total_SS)
+```
+
+This model has an R-squared value of 0.648 on the test dataset. It could be overfitting since the R-squared value on the training dataset was much higher.
+
+How would a random forest regression model compare?
+
+```{r}
+# Fit a random forest model
+rf_mdl_price <- ranger(fmla, data = train_data,
+                       num.trees = 500,
+                       respect.unordered.factors = "order")
+
+# Make predictions
+explanatory_data_rf <- test_data %>%
+  select(-Price)
+
+explanatory_data_rf <- explanatory_data_rf %>%
+  mutate(Price_pred = predict(rf_mdl_price, explanatory_data_rf)$predictions)
+
+explanatory_data_rf$Price <- test_data$Price
+
+# Evaluate the model
+explanatory_data_rf <- explanatory_data_rf %>%
+  mutate(res_price = Price_pred - Price,
+         res_mean = Price - mean(Price),
+         res_price_sq = res_price^2,
+         res_mean_sq = res_mean^2)
+
+total_SS <- sum(explanatory_data_rf$res_mean_sq)
+res_SS <- sum(explanatory_data_rf$res_price_sq)
+r_squared_rf <- 1 - (res_SS/total_SS)
+```
+
+This model has an R-squared value of 0.6911 on the testing dataset.
+
+Finally, how would a decision tree model compare?
+
+```{r}
+# Fit a decision tree model
+dt_mdl_price <- rpart(fmla, method = "anova", data = train_data)
+
+# Plot the decision tree model
+rpart.plot(dt_mdl_price, fallen.leaves = TRUE)
+```
+
+The output shown here represents the decision tree model's decision making process in estimating the flight's fare.
+
+```{r}
+# Make predictions
+explanatory_data_dt <- test_data %>%
+  select(-Price)
+
+explanatory_data_dt <- explanatory_data_dt %>%
+  mutate(Price_pred = predict(dt_mdl_price, explanatory_data_dt))
+
+explanatory_data_dt$Price <- test_data$Price
+
+# Evaluate the model
+explanatory_data_dt <- explanatory_data_dt %>%
+  mutate(res_price = Price_pred - Price,
+         res_mean = Price - mean(Price),
+         res_price_sq = res_price^2,
+         res_mean_sq = res_mean^2)
+
+total_SS <- sum(explanatory_data_dt$res_mean_sq)
+res_SS <- sum(explanatory_data_dt$res_price_sq)
+r_squared_dt <- 1 - (res_SS/total_SS)
+```
+
+The R-squared value for this model is 0.418
+
+It is possible that the model is not as accurate as it could be because of interactions. Interactions are where the effect of one explanatory variable on the response variable depends on the value of one or more other explanatory variables.
+
+```{r}
+# Define a new formula with interactions
+fmla_int <- Price ~ Airline * Route * Total_Stops * Month + 0
+
+# Re-build the linear regression model with the new formula and evaluate it
+linear_mdl_price_int <- lm(fmla_int, data = train_data)
+
+# Make predictions
+explanatory_data_lr_int <- test_data %>%
+  select(-Price)
+
+explanatory_data_lr_int <- explanatory_data_lr_int %>%
+  mutate(Price_pred = predict(linear_mdl_price_int, explanatory_data_lr_int))
+
+explanatory_data_lr_int$Price <- test_data$Price
+
+# Evaluate the model on the testing data
+explanatory_data_lr_int <- explanatory_data_lr_int %>%
+  mutate(res_price = Price_pred - Price,
+         res_mean = Price - mean(Price),
+         res_price_sq = res_price^2,
+         res_mean_sq = res_mean^2)
+
+total_SS <- sum(explanatory_data_lr_int$res_mean_sq)
+res_SS <- sum(explanatory_data_lr_int$res_price_sq)
+r_squared_lr_int <- 1 - (res_SS/total_SS)
+```
+
+The R-squared value for this model is 0.697
+
+Create a tibble of the final R-squared results and print it to summarize the results of all three models
+
+```{r}
+final_results <- tibble(
+  model = c("Linear Regression", "Random Forest", "Decision Tree", 
+            "Linear Regression with Interactions"),
+  r_squared = c(r_squared_lr, r_squared_rf, r_squared_dt, r_squared_lr_int)
+)
+
+final_results
+```
+
+According to this summary table, the best model observed was the linear regression model with interaction terms.
+
+What do the diagnostic plots for this model show?
+
+```{r}
+# Plot the linear regression model with interactions (test data)
+ggplot(explanatory_data_lr_int, aes(x = Price_pred, y = res_price)) +
+  geom_point() +
+  ggtitle("Model residuals against predicted prices on test data")
+```
+
+```{r}
+# Make diagnostic plots of the linear regression model with interactions (training data)
+autoplot(
+  linear_mdl_price_int,
+  which = 1:3,
+  nrow = 3,
+  ncol = 1
+)
+```
+
+# Results
+
+## Discussion
+From the modeling studies, the best performing model was the linear regression model with the interaction terms. This model had an R-squared value of 0.697, meaning that approximately 69.7% of the variation in flight fare could be explained by the flight Airline, Route, Total Stops, and Month of the year. This is a fair accuracy, but there is certainly room for improvement. Additionally, when the model residuals are plotted against the predicted values, some observed errors appear to be as large as -25,000. Practically, this means that in the worse case scenario, the model could underestimate the actual flight fare by approximately 25,000. This certainly is not desirable from a business perspective, so some additional tuning should be done to reduce that error.
+
+## Limitations and Next Steps
+As mentioned in the discussion, there are a few action steps that should be taken before potentially deploying this model in production. Firstly, we would attempt to improve the model's accuracy. This can be done by re-examining certain features that were not included in the initial model, and try including them in the model to see if they make improvements. We could also test other ensemble models, such as gradient-boosted trees, since the random forest model scored very closely to the linear regression model. 
+
+Some of the limitations of this dataset should also be mentioned. This dataset mainly pulls data from flights in India, and thus would not be suitable to be applied to flights in other countries or international flights. To extrapolate to flights in other areas, more representative data should be collected. This dataset also limits its scope to the spring and summer months of 2019, and in order to have more accurate predictions with other times of the year, more data from other times of the year should be collected.
+
+# Conclusion
+To conclude, this project focused on a flight dataset containing flights within India to build a regression model that can predict the fare of a flight given the Airline, Route, Number of Stops, and Month of the year. The final model found that 69.7% of the variation in flight fare could be explained by these four features. To improve on the accuracy, next steps were outlined including exploration of additional features and other ensemble models. Finally, limitations of the dataset were discussed and recommendations for expanding the scope of this project were listed. Ultimately, implementing similar models could serve travelers well when planning out their next trip to get the best possible fare.
+
