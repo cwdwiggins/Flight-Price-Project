@@ -1,42 +1,45 @@
 ---
-title: "index"
+title: "Flight Price Prediction Project"
 author: "Cole Dwiggins"
 date: "2024-09-30"
-output: html_document
+output: 
+  html_document:
+    fig_caption: yes
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
 ---
 
-# Flight Price Prediction Project
-
-## Introduction
+# Introduction
 
 In this project, we attempt to predict the prices of airfares in India based off four features: the airline, the route the flight is taking, the total number of stops the flight makes during its route, and the time of the year. This dataset was obtained from Kaggle (link to the dataset: <https://www.kaggle.com/datasets/viveksharmar/flight-price-data>), and these features were determined after examining their effects on the flight fares through exploratory data analysis. After determining the features to use in modeling, three regression models were compared. The comparison included linear regression, random forest regression, and decision tree regression, and each model's performance was evaluated their respective prediction residuals and calculating the model's R-squared value. The best model was then selected and its diagnostic plots were built. Conclusion and next steps are discussed at the end of the analysis.
 
-## Project code
+# Project code
 
-### Import required libraries and data
-
-```{r}
-library(readr)
-library(dplyr)
-library(ggplot2)
-library(car)
-library(stringr)
-library(tidymodels)
-library(ranger)
-library(rpart)
-library(rpart.plot)
-library(ggfortify)
-
-flights <- read_csv("flight_dataset.csv")
-```
-
-### Data Inspection and cleaning
-
-Summary of the data
+## Import required libraries and data
 
 ```{r}
-str(flights)
+library <- function (...) {
+   packages <- as.character(match.call(expand.dots = FALSE)[[2]])
+   suppressWarnings(suppressMessages(lapply(packages, base::library, character.only = TRUE)))
+   return(invisible())
+}
+library(readr,
+        dplyr,
+        ggplot2,
+        car,
+        stringr,
+        tidymodels,
+        ranger,
+        rpart,
+        rpart.plot,
+        ggfortify)
+
+flights <- read_csv("flight_dataset.csv", show_col_types = FALSE)
 ```
+
+## Data Inspection and cleaning
 
 Evaluate for missing data
 
@@ -63,7 +66,7 @@ flights <- flights %>%
          )
 ```
 
-### Exploratory Data Analysis
+## Exploratory Data Analysis
 
 The purpose of this section is to identify candidate features for the regression model. To do this, each of the variables will be examined to identify which has a substantial impact on price. Occasionally, statistical analysis is used to confirm assumptions or further investigate the impact a particular variable has on the flight fare.
 
@@ -324,7 +327,7 @@ There doesn't appear to be much separation at all here.
 
 **Thus, the proposed features will thus be: Airline, Route, Total_Stops, and Month**
 
-### Regression Modeling
+## Regression Modeling
 
 Using the features proposed from the exploratory data analysis, three regression models will be compared for the best performance. The three models that will be used are linear regression, random forest regression, and decision tree regression. There will also be a brief analysis comparing the performance of the linear regression model with interaction terms present. The goal of adding interaction terms is to increase the accuracy of the model by accounting for potential changes in explanatory variable impact on the flight fare due to the value of other explanatory variables. The results will be summarized in a dataframe and diagnostic plots of the final model will be drawn.
 
